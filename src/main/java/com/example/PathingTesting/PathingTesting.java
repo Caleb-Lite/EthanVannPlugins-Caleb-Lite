@@ -29,7 +29,7 @@ import java.util.Random;
 @PluginDescriptor(name = "PathingTesting", description = "", enabledByDefault = false, tags = {"Testing"})
 public class PathingTesting extends Plugin {
     public static List<WorldPoint> path = new ArrayList<>();
-    static List<WorldPoint> fullPath = new ArrayList<>();
+    public static List<WorldPoint> fullPath = new ArrayList<>();
     public static WorldPoint currentPathDestination = null;
     public static WorldPoint goal = null;
     @Inject
@@ -173,7 +173,7 @@ public class PathingTesting extends Plugin {
         return isDoored(tA, tB);
     }
 
-    private static boolean isDoored(Tile a, Tile b) {
+    public static boolean isDoored(Tile a, Tile b) {
         WallObject wallObject = a.getWallObject();
         if (wallObject != null) {
             ObjectComposition objectComposition = EthanApiPlugin.getClient().getObjectDefinition(wallObject.getId());

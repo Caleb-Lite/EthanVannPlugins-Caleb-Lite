@@ -1,5 +1,11 @@
 package shortestpath;
 
+import com.example.Additions.SleepUtils;
+import com.example.EthanApiPlugin.EthanApiPlugin;
+import com.example.Packets.MousePackets;
+import com.example.Packets.MovementPackets;
+import com.example.Packets.ObjectPackets;
+import com.example.PathingTesting.PathingTesting;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.inject.Inject;
 import com.google.inject.Provides;
@@ -21,16 +27,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import lombok.Getter;
-import net.runelite.api.Client;
-import net.runelite.api.KeyCode;
-import net.runelite.api.MenuAction;
-import net.runelite.api.MenuEntry;
-import net.runelite.api.Player;
-import net.runelite.api.Point;
-import net.runelite.api.SpriteID;
-import net.runelite.api.Varbits;
+import net.runelite.api.*;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuEntryAdded;
@@ -53,10 +53,9 @@ import net.runelite.client.ui.overlay.worldmap.WorldMapPointManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
-import shortestpath.pathfinder.CollisionMap;
-import shortestpath.pathfinder.Pathfinder;
-import shortestpath.pathfinder.PathfinderConfig;
-import shortestpath.pathfinder.SplitFlagMap;
+import shortestpath.pathfinder.*;
+import shortestpath.WorldPointUtil;
+import shortestpath.pathfinder.Node;
 
 @PluginDescriptor(
     name = "Shortest Path",
@@ -123,6 +122,9 @@ public class ShortestPathPlugin extends Plugin {
     private BufferedImage minimapSpriteFixed;
     private BufferedImage minimapSpriteResizeable;
     private Rectangle minimapRectangle = new Rectangle();
+    private boolean autoMoving = false;
+    private final List<WorldPoint> visitedTiles = new ArrayList<>();
+    private final List<WorldPoint> usedTransports = new ArrayList<>();
 
     private ExecutorService pathfindingExecutor = Executors.newSingleThreadExecutor();
     private Future<?> pathfinderFuture;
@@ -238,25 +240,95 @@ public class ShortestPathPlugin extends Plugin {
     }
 
     @Subscribe
-    public void onGameTick(GameTick tick) {
+    private void onGameTick(GameTick e) {
         Player localPlayer = client.getLocalPlayer();
-        if (localPlayer == null || pathfinder == null) {
+        if (localPlayer == null) {
             return;
         }
 
         WorldPoint currentLocation = client.isInInstancedRegion() ?
-            WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation()) : localPlayer.getWorldLocation();
-        if (currentLocation.distanceTo(pathfinder.getTarget()) < config.reachedDistance()) {
-            setTarget(null);
+                WorldPoint.fromLocalInstance(client, localPlayer.getLocalLocation()) : localPlayer.getWorldLocation();
+
+        // Add the current location to the set of visited tiles
+        visitedTiles.add(currentLocation);
+
+        if (PathingTesting.goal != null && PathingTesting.goal.equals(currentLocation)) {
+            // Clear the paths once the player reaches the destination
+            System.out.println("Reached the goal. Clearing paths.");
+            PathingTesting.goal = null;
+            PathingTesting.path = null;
+            PathingTesting.fullPath = null;
+            PathingTesting.currentPathDestination = null;
+            autoMoving = false;
+            visitedTiles.clear(); // Clear visited tiles
+            usedTransports.clear();
+            setTarget(null);// Clear used transports
             return;
         }
 
-        if (!startPointSet && !isNearPath(currentLocation)) {
-            if (config.cancelInstead()) {
-                setTarget(null);
-                return;
+        //suggestTeleports(currentLocation, goal);
+
+        if (PathingTesting.path != null && !PathingTesting.path.isEmpty()) {
+            autoMoving = true;
+
+            if (PathingTesting.currentPathDestination != null && !PathingTesting.currentPathDestination.equals(currentLocation) && !EthanApiPlugin.isMoving()) {
+                MousePackets.queueClickPacket();
+                MovementPackets.queueMovement(PathingTesting.currentPathDestination);
             }
-            restartPathfinding(currentLocation, pathfinder.getTarget());
+
+            if (PathingTesting.currentPathDestination == null || PathingTesting.currentPathDestination.equals(currentLocation) || !EthanApiPlugin.isMoving()) {
+                int step = PathingTesting.rand.nextInt(26) + 10; // Random step between 10 and 35
+                int max = step;
+                for (int i = 0; i < step; i++) {
+                    if (PathingTesting.path.size() - 2 >= i) {
+                        WorldPoint currentStep = PathingTesting.path.get(i);
+                        WorldPoint nextStep = PathingTesting.path.get(i + 1);
+
+                        // Check and handle transport
+                        if (walkTo(nextStep)) {
+                            return; // Exit after handling the transport
+                        }
+
+                        if (PathingTesting.isDoored(currentStep, nextStep)) {
+                            System.out.println("Found a door in the path between: " + currentStep + " and " + nextStep);
+                            max = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (PathingTesting.isDoored(currentLocation, PathingTesting.path.get(0))) {
+                    System.out.println("Opening door at: " + currentLocation);
+                    WallObject wallObject = PathingTesting.getTile(currentLocation).getWallObject();
+                    if (wallObject == null) {
+                        wallObject = PathingTesting.getTile(PathingTesting.path.get(0)).getWallObject();
+                    }
+                    ObjectPackets.queueObjectAction(wallObject, false, "Open", "Close");
+                    return;
+                }
+
+                step = Math.min(max, PathingTesting.path.size() - 1);
+                PathingTesting.currentPathDestination = PathingTesting.path.get(step);
+
+                if (PathingTesting.path.indexOf(PathingTesting.currentPathDestination) == PathingTesting.path.size() - 1) {
+                    System.out.println("Reached the last point in the path: " + PathingTesting.currentPathDestination);
+                } else {
+                    PathingTesting.path = PathingTesting.path.subList(step + 1, PathingTesting.path.size());
+                }
+
+                if (PathingTesting.currentPathDestination.equals(currentLocation)) {
+                    return;
+                }
+
+                MousePackets.queueClickPacket();
+                MovementPackets.queueMovement(PathingTesting.currentPathDestination);
+            }
+
+            // Remove all visited tiles from the path
+            PathingTesting.path.removeIf(visitedTiles::contains);
+            if (PathingTesting.fullPath != null) {
+                PathingTesting.fullPath.removeIf(visitedTiles::contains);
+            }
         }
     }
 
@@ -583,4 +655,21 @@ public class ShortestPathPlugin extends Plugin {
         }
         return polygon;
     }
+
+    public boolean walkTo(WorldPoint goal) {
+        if (pathfinder == null || !pathfinder.isDone()) {
+            return false;
+        }
+        PathingTesting.currentPathDestination = null;
+        PathingTesting.path = pathfinder.getPath(); // Use the path from the pathfinder
+        if (PathingTesting.path == null || PathingTesting.path.isEmpty()) {
+            // Pathfinding failed, return false
+            return false;
+        }
+        PathingTesting.fullPath = new ArrayList<>(PathingTesting.path);
+        PathingTesting.goal = goal;
+        PathingTesting.currentPathDestination = null;
+        return true;
+    }
+
 }
